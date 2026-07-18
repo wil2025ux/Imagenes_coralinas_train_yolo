@@ -165,27 +165,6 @@ python3 run_prototipo_v1.py
 python3 prototipo_v1/app_legacy.py --weights path/a/best.pt --port 9002
 ```
 
-### Generadores de reportes DOCX
-
-Requieren `python-docx` y rutas locales de documentos/figuras (no versionadas).
-
-```bash
-pip install python-docx
-python3 generar_reporte_proyecto_final_vision3d.py
-python3 generar_reporte_tecnico_final_docx.py
-python3 generar_informe_biologo_docx.py
-python3 generar_evaluacion_heuristica_docx.py
-```
-
-### `generar_tabla_corridas_tex.py`
-
-Consolida métricas de corridas a tabla LaTeX (según salidas en `experimentos_seg3/`).
-
-```bash
-python3 generar_tabla_corridas_tex.py
-# (revisa argumentos con: python3 generar_tabla_corridas_tex.py -h)
-```
-
 ---
 
 ## Paquete `coarcp_ia/`
@@ -221,22 +200,3 @@ Uso típico:
 ```bash
 python3 train_seg.py --data benthic_yolo_seg/dataset.yaml ...
 ```
-
----
-
-## Copia en `ENTREGA_TESIS_SEGMENTACION_BENTONICA/algoritmos/`
-
-Misma familia de scripts que en la raíz (entrega empaquetada). Uso equivalente, por ejemplo:
-
-```bash
-cd ENTREGA_TESIS_SEGMENTACION_BENTONICA/algoritmos
-python3 run.py --weights ../../experimentos_seg3/runs/seg3_r012/weights/best.pt --port 9001
-```
-
-Prefiere los scripts de la **raíz** del repo para desarrollo diario.
-
----
-
-## Qué no está en Git (a propósito)
-
-`.gitignore` excluye: `*.md` (salvo este README), PDF/Word, `.venv`, `images/`, `runs/`, `experimentos_seg3/`, `*.pt`, zips, notebooks, `result_coco.json`, DB SQLite, etc.

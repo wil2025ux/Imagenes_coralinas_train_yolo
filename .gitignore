@@ -84,6 +84,14 @@ result_coco.json
 *.ipynb
 *.ipynb_checkpoints/
 
+# --- Generadores de reportes (locales; no versionar) ---
+generar_*_docx.py
+generar_reporte_*.py
+generar_informe_*.py
+generar_evaluacion_*.py
+generar_tabla_corridas_tex.py
+**/generar_tabla_corridas_tex.py
+
 # --- Entrega empaquetada ---
 ENTREGA_TESIS_SEGMENTACION_BENTONICA.zip
 ENTREGA_TESIS_SEGMENTACION_BENTONICA/datos/
