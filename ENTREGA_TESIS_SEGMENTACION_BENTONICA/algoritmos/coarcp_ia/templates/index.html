@@ -1,0 +1,841 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoArrCP IA Flask</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">IA</div>
+      <div>
+        <h1>CoArrCP IA</h1>
+        <p>Segmentación bentónica</p>
+      </div>
+    </div>
+
+    {% set items = [
+      ('inicio', 'Inicio', '🏠'),
+      ('cargar', 'Cargar imágenes', '📁'),
+      ('inferencia', 'Inferencia IA', '🤖'),
+      ('revision', 'Revisión manual', '🖼️'),
+      ('componentes', 'Componentes', '🪸'),
+      ('bd', 'Base de datos', '🗃️'),
+      ('estadistica', 'Estadística', '📊'),
+      ('config', 'Configuración', '⚙️')
+    ] %}
+
+    <nav>
+      {% for key, label, icon in items %}
+      <a class="{{ 'active' if tab == key else '' }}" href="{{ url_for('index', tab=key, image_id=selected_image_id) }}">
+        <span>{{ icon }}</span>{{ label }}
+      </a>
+      {% endfor %}
+    </nav>
+
+    <div class="sidebar-footer">
+      {% if model_loaded %}
+        <span class="pill ok">Modelo cargado</span>
+      {% else %}
+        <span class="pill bad">Modelo no cargado</span>
+      {% endif %}
+      <small>{{ classes|length }} clase/s</small>
+    </div>
+  </aside>
+
+  <main class="main">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+      <div class="flash-zone">
+        {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    {% endwith %}
+
+    {% if tab == 'inicio' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Panel principal</h2>
+          <p>Flujo inspirado en CoArrCP: cargar imágenes, ejecutar IA, revisar resultados y generar estadísticas.</p>
+        </div>
+        <a class="button primary" href="{{ url_for('index', tab='cargar') }}">Cargar imágenes</a>
+      </div>
+
+      <div class="metrics">
+        <div class="metric"><span>{{ overview.total_images }}</span><label>Imágenes</label></div>
+        <div class="metric"><span>{{ overview.pending_images }}</span><label>Pendientes</label></div>
+        <div class="metric"><span>{{ overview.reviewed_images }}</span><label>Revisadas</label></div>
+        <div class="metric"><span>{{ overview.total_detections }}</span><label>Detecciones</label></div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h3>Últimas imágenes procesadas</h3>
+          {% if overview.latest_images %}
+          <div class="list">
+            {% for img in overview.latest_images %}
+            <a class="list-row" href="{{ url_for('index', tab='revision', image_id=img.id) }}">
+              <span>
+                <strong>{{ img.original_name }}</strong>
+                <small>{{ img.group_name or 'general' }} · {{ img.created_at }}</small>
+              </span>
+              <em>{{ img.status }}</em>
+            </a>
+            {% endfor %}
+          </div>
+          {% else %}
+            <p class="muted">Todavía no hay imágenes procesadas.</p>
+          {% endif %}
+        </div>
+
+        <div class="card">
+          <h3>Cobertura promedio por clase</h3>
+          {% if overview.avg_coverage %}
+          <table>
+            <thead><tr><th>Clase</th><th>Promedio %</th></tr></thead>
+            <tbody>
+              {% for row in overview.avg_coverage %}
+              <tr><td>{{ row.class_name }}</td><td>{{ row.avg_percent }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+            <p class="muted">Sin datos de cobertura todavía.</p>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'cargar' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Cargar imágenes</h2>
+          <p>Arrastra imágenes o carpetas, o selecciónalas manualmente. La app ejecutará YOLO-seg y guardará los resultados en SQLite.</p>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h3>Subir desde navegador</h3>
+          <form id="upload-form" method="post" action="{{ url_for('procesar') }}" enctype="multipart/form-data">
+            <input type="file" id="file-input" name="files" accept=".jpg,.jpeg,.png,.webp,.bmp" multiple hidden>
+            <input type="file" id="folder-input" accept=".jpg,.jpeg,.png,.webp,.bmp" webkitdirectory directory multiple hidden>
+
+            <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Arrastrar imágenes o carpetas">
+              <div class="drop-icon">📁</div>
+              <p class="drop-title"><strong>Arrastra imágenes o carpetas aquí</strong></p>
+              <p class="hint">Suelta uno o varios archivos, o una carpeta completa con subcarpetas.</p>
+              <p id="drop-status" class="drop-status hidden"></p>
+            </div>
+
+            <div class="file-actions">
+              <button type="button" class="button" id="pick-images">Seleccionar imágenes</button>
+              <button type="button" class="button" id="pick-folder">Seleccionar carpeta</button>
+              <button type="button" class="button ghost" id="clear-files">Limpiar</button>
+            </div>
+
+            <div class="form-row">
+              <div>
+                <label>conf</label>
+                <input type="number" step="0.01" min="0" max="1" name="conf" value="0.25">
+              </div>
+              <div>
+                <label>iou</label>
+                <input type="number" step="0.01" min="0" max="1" name="iou" value="0.50">
+              </div>
+              <div>
+                <label>Puntos</label>
+                <input type="number" min="1" max="100" name="point_count" value="13">
+              </div>
+            </div>
+
+            <button class="button primary" type="submit" id="submit-upload">Procesar con IA</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h3>Procesar carpeta local del servidor</h3>
+          <form method="post" action="{{ url_for('procesar_carpeta_servidor') }}">
+            <label>Ruta de carpeta</label>
+            <input type="text" name="folder_path" placeholder="/Users/arath/imagenes_arrecife">
+            <p class="hint">Útil cuando Flask corre en tu propia computadora y quieres leer una carpeta directamente.</p>
+
+            <div class="form-row">
+              <div>
+                <label>conf</label>
+                <input type="number" step="0.01" min="0" max="1" name="conf" value="0.25">
+              </div>
+              <div>
+                <label>iou</label>
+                <input type="number" step="0.01" min="0" max="1" name="iou" value="0.50">
+              </div>
+              <div>
+                <label>Puntos</label>
+                <input type="number" min="1" max="100" name="point_count" value="13">
+              </div>
+            </div>
+
+            <label class="check"><input type="checkbox" name="recursive"> Incluir subcarpetas</label>
+            <button class="button" type="submit">Procesar carpeta</button>
+          </form>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'inferencia' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Inferencia IA</h2>
+          <p>Resultados de segmentación, cobertura, detecciones y puntos generados automáticamente.</p>
+        </div>
+        <a class="button primary" href="{{ url_for('index', tab='cargar') }}">Nueva inferencia</a>
+      </div>
+
+      <div class="card">
+        <h3>Imágenes procesadas</h3>
+        {% if images %}
+        <table>
+          <thead>
+            <tr>
+              <th>Imagen</th><th>Grupo</th><th>Estado</th><th>Detecciones</th><th>Tiempo</th><th>Acción</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for img in images %}
+            <tr>
+              <td>{{ img.original_name }}</td>
+              <td>{{ img.group_name or 'general' }}</td>
+              <td><span class="tag">{{ img.status }}</span></td>
+              <td>{{ img.num_detections or 0 }}</td>
+              <td>{{ img.processing_ms or 0 }} ms</td>
+              <td><a class="button small" href="{{ url_for('index', tab='revision', image_id=img.id) }}">Revisar</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No hay imágenes procesadas.</p>
+        {% endif %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'revision' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Revisión manual</h2>
+          <p>Arrastra los puntos numerados sobre los componentes bentónicos. Al soltar, se recalcula la clase en esa posición.</p>
+        </div>
+      </div>
+
+      <div class="grid review">
+        <div class="card">
+          <h3>Seleccionar imagen</h3>
+          {% if images %}
+          <div class="list compact">
+            {% for img in images %}
+            <a class="list-row {{ 'selected' if selected_image_id == img.id else '' }}" href="{{ url_for('index', tab='revision', image_id=img.id) }}">
+              <span>
+                <strong>{{ img.original_name }}</strong>
+                <small>{{ img.group_name or 'general' }} · {{ img.status }}</small>
+              </span>
+            </a>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="muted">Carga imágenes primero.</p>
+          {% endif %}
+        </div>
+
+        <div class="card wide">
+          {% if detail and detail.image %}
+            <div class="detail-head">
+              <div>
+                <h3>{{ detail.image.original_name }}</h3>
+                <p class="muted">{{ detail.image.width }}×{{ detail.image.height }} px · {{ detail.image.group_name or 'general' }}</p>
+              </div>
+              <div class="actions">
+                <form method="post" action="{{ url_for('marcar_revisado', image_id=detail.image.id) }}">
+                  <button class="button primary" type="submit">Marcar revisada</button>
+                </form>
+                <form method="post" action="{{ url_for('marcar_pendiente', image_id=detail.image.id) }}">
+                  <button class="button" type="submit">Marcar pendiente</button>
+                </form>
+              </div>
+            </div>
+
+            {% if detail.image.result_path %}
+            <div class="point-editor-wrap">
+              <div class="point-legend">
+                <span class="legend-item ok">Verde = componente detectado</span>
+                <span class="legend-item bad">Rojo = sin detección</span>
+                <span class="legend-item hint">Arrastra un punto · clic en fila para resaltar</span>
+              </div>
+              <div
+                id="point-editor"
+                class="point-editor"
+                data-image-id="{{ detail.image.id }}"
+                data-width="{{ detail.image.width }}"
+                data-height="{{ detail.image.height }}"
+              >
+                <img
+                  id="review-image"
+                  class="result-img"
+                  src="{{ url_for('static', filename=detail.image.result_path) }}?v={{ detail.run.id if detail.run else 1 }}"
+                  alt="Resultado IA"
+                >
+                <div id="point-overlay" class="point-overlay">
+                  {% for p in detail.points %}
+                  <button
+                    type="button"
+                    class="point-marker {{ 'detectado' if p.status == 'detectado' else 'sin_deteccion' }}"
+                    data-point-index="{{ p.point_index }}"
+                    data-x="{{ p.x }}"
+                    data-y="{{ p.y }}"
+                    style="left: {{ (100 * p.x / detail.image.width) if detail.image.width else 0 }}%; top: {{ (100 * p.y / detail.image.height) if detail.image.height else 0 }}%;"
+                    title="Punto {{ p.point_index }}: {{ p.class_name or 'Sin detección' }}"
+                  >{{ p.point_index }}</button>
+                  {% endfor %}
+                </div>
+              </div>
+              <p id="point-save-status" class="point-save-status muted">Los cambios se guardan al soltar cada punto.</p>
+            </div>
+            {% endif %}
+
+            <div class="grid two">
+              <div>
+                <h3>Cobertura por clase</h3>
+                <table>
+                  <thead><tr><th>Clase</th><th>%</th></tr></thead>
+                  <tbody>
+                  {% for row in detail.coverage %}
+                    <tr><td>{{ row.class_name }}</td><td>{{ row.percent }}</td></tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+
+              <div>
+                <h3>Puntos de conteo</h3>
+                <table>
+                  <thead><tr><th>#</th><th>Clase</th><th>Componente</th><th>Conf.</th><th>Estado</th></tr></thead>
+                  <tbody>
+                  {% for p in detail.points %}
+                    <tr class="point-row" data-point-index="{{ p.point_index }}">
+                      <td>{{ p.point_index }}</td>
+                      <td class="point-class">{{ p.class_name or 'Sin detección' }}</td>
+                      <td class="point-component">{{ p.component_name or '-' }}</td>
+                      <td class="point-confidence">{{ p.confidence }}</td>
+                      <td class="point-status">{{ p.status }}{% if p.edited_manual %} · editado{% endif %}</td>
+                    </tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <h3>Detecciones</h3>
+            <table>
+              <thead><tr><th>Clase</th><th>Componente</th><th>Conf.</th><th>BBox</th></tr></thead>
+              <tbody>
+                {% if detail.detections %}
+                  {% for d in detail.detections %}
+                  <tr>
+                    <td>{{ d.class_name }}</td>
+                    <td>{{ d.component_name }}</td>
+                    <td>{{ d.confidence }}</td>
+                    <td>[{{ d.x1 }}, {{ d.y1 }}, {{ d.x2 }}, {{ d.y2 }}]</td>
+                  </tr>
+                  {% endfor %}
+                {% else %}
+                  <tr><td colspan="4">Sin detecciones para los umbrales actuales.</td></tr>
+                {% endif %}
+              </tbody>
+            </table>
+          {% else %}
+            <p class="muted">Selecciona una imagen para revisar.</p>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'componentes' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Componentes bentónicos</h2>
+          <p>Relaciona las clases del modelo YOLO-seg con componentes y grupos usados para los reportes.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        {% if components %}
+        <form method="post" action="{{ url_for('guardar_componentes') }}">
+          <table>
+            <thead>
+              <tr>
+                <th>Clase YOLO</th>
+                <th>Componente CoArrCP</th>
+                <th>GGMF</th>
+                <th>GMF</th>
+                <th>Notas</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for c in components %}
+              <tr>
+                <td>
+                  <strong>{{ c.class_name }}</strong>
+                  <input type="hidden" name="class_name" value="{{ c.class_name }}">
+                </td>
+                <td><input type="text" name="component_name" value="{{ c.component_name }}"></td>
+                <td><input type="text" name="ggmf" value="{{ c.ggmf or '' }}" placeholder="Sustrato / Scleractinia / ..."></td>
+                <td><input type="text" name="gmf" value="{{ c.gmf or '' }}"></td>
+                <td><input type="text" name="notes" value="{{ c.notes or '' }}"></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <button class="button primary" type="submit">Guardar componentes</button>
+        </form>
+        {% else %}
+        <p class="muted">Carga el modelo para importar las clases YOLO automáticamente.</p>
+        {% endif %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'bd' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Base de datos</h2>
+          <p>La información del proyecto se guarda en SQLite para mantener imágenes, inferencias, detecciones, puntos y componentes.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Archivo SQLite</h3>
+        <code>{{ db_path }}</code>
+        <div class="metrics small-metrics">
+          <div class="metric"><span>{{ overview.total_images }}</span><label>Imágenes</label></div>
+          <div class="metric"><span>{{ overview.total_detections }}</span><label>Detecciones</label></div>
+          <div class="metric"><span>{{ classes|length }}</span><label>Clases IA</label></div>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'estadistica' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Estadística</h2>
+          <p>Resumen global de cobertura y frecuencia de clases detectadas.</p>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h3>Cobertura promedio global</h3>
+          {% if overview.avg_coverage %}
+          <table>
+            <thead><tr><th>Clase</th><th>Promedio %</th></tr></thead>
+            <tbody>
+              {% for row in overview.avg_coverage %}
+              <tr><td>{{ row.class_name }}</td><td>{{ row.avg_percent }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="muted">Sin coberturas todavía.</p>
+          {% endif %}
+        </div>
+
+        <div class="card">
+          <h3>Frecuencia de detecciones</h3>
+          {% if overview.top_classes %}
+          <table>
+            <thead><tr><th>Clase</th><th>Detecciones</th></tr></thead>
+            <tbody>
+              {% for row in overview.top_classes %}
+              <tr><td>{{ row.class_name }}</td><td>{{ row.total }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="muted">Sin detecciones todavía.</p>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'config' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Configuración</h2>
+          <p>Estado del modelo y parámetros principales.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Modelo YOLO-seg</h3>
+        <p><strong>Estado:</strong> {{ 'Cargado' if model_loaded else 'No cargado' }}</p>
+        <p><strong>Pesos:</strong> <code>{{ weights_loaded or 'No disponible' }}</code></p>
+        <p><strong>Clases:</strong> {{ classes|join(', ') if classes else 'Sin clases' }}</p>
+        <p class="hint">Para cambiar el modelo, reinicia con <code>python3 run.py --weights experimentos_seg3/runs/seg3_r012/weights/best.pt</code> desde la raíz del proyecto.</p>
+      </div>
+    </section>
+    {% endif %}
+  </main>
+  {% if tab == 'revision' %}
+  <script>
+    (function () {
+      const editor = document.getElementById("point-editor");
+      if (!editor) return;
+
+      const imageId = editor.dataset.imageId;
+      const image = document.getElementById("review-image");
+      const statusEl = document.getElementById("point-save-status");
+      const markers = [...editor.querySelectorAll(".point-marker")];
+      const rows = [...document.querySelectorAll(".point-row")];
+
+      let dragMarker = null;
+      let dragOffsetX = 0;
+      let dragOffsetY = 0;
+
+      function imageMetrics() {
+        const rect = image.getBoundingClientRect();
+        return {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          naturalWidth: image.naturalWidth || Number(editor.dataset.width),
+          naturalHeight: image.naturalHeight || Number(editor.dataset.height),
+        };
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(Math.max(value, min), max);
+      }
+
+      function setMarkerPosition(marker, x, y) {
+        const metrics = imageMetrics();
+        marker.style.left = `${(x / metrics.naturalWidth) * 100}%`;
+        marker.style.top = `${(y / metrics.naturalHeight) * 100}%`;
+        marker.dataset.x = String(x);
+        marker.dataset.y = String(y);
+      }
+
+      function highlightPoint(pointIndex) {
+        markers.forEach((marker) => {
+          marker.classList.toggle("active", marker.dataset.pointIndex === String(pointIndex));
+        });
+        rows.forEach((row) => {
+          row.classList.toggle("active", row.dataset.pointIndex === String(pointIndex));
+        });
+      }
+
+      function updateRow(point) {
+        const row = rows.find((item) => item.dataset.pointIndex === String(point.point_index));
+        if (!row) return;
+        row.querySelector(".point-class").textContent = point.class_name || "Sin detección";
+        row.querySelector(".point-component").textContent = point.component_name || "-";
+        row.querySelector(".point-confidence").textContent = point.confidence;
+        row.querySelector(".point-status").textContent = `${point.status} · editado`;
+
+        const marker = markers.find((item) => item.dataset.pointIndex === String(point.point_index));
+        if (!marker) return;
+        marker.classList.remove("detectado", "sin_deteccion");
+        marker.classList.add(point.status === "detectado" ? "detectado" : "sin_deteccion");
+        marker.title = `Punto ${point.point_index}: ${point.class_name || "Sin detección"}`;
+      }
+
+      async function savePoint(marker) {
+        statusEl.textContent = "Guardando punto...";
+        statusEl.classList.remove("error");
+
+        try {
+          const response = await fetch(`/imagen/${imageId}/puntos`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              points: [{
+                point_index: Number(marker.dataset.pointIndex),
+                x: Number(marker.dataset.x),
+                y: Number(marker.dataset.y),
+              }],
+            }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "No se pudo guardar el punto.");
+
+          (data.points || []).forEach(updateRow);
+          image.src = image.src.split("?")[0] + "?v=" + Date.now();
+          statusEl.textContent = "Punto actualizado y clase recalculada.";
+        } catch (error) {
+          statusEl.textContent = error.message;
+          statusEl.classList.add("error");
+        }
+      }
+
+      markers.forEach((marker) => {
+        marker.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          dragMarker = marker;
+          marker.setPointerCapture(event.pointerId);
+          highlightPoint(marker.dataset.pointIndex);
+
+          const rect = marker.getBoundingClientRect();
+          dragOffsetX = event.clientX - (rect.left + rect.width / 2);
+          dragOffsetY = event.clientY - (rect.top + rect.height / 2);
+          marker.classList.add("dragging");
+        });
+
+        marker.addEventListener("click", () => highlightPoint(marker.dataset.pointIndex));
+      });
+
+      rows.forEach((row) => {
+        row.addEventListener("click", () => highlightPoint(row.dataset.pointIndex));
+      });
+
+      window.addEventListener("pointermove", (event) => {
+        if (!dragMarker) return;
+        const metrics = imageMetrics();
+        const centerX = event.clientX - dragOffsetX - metrics.left;
+        const centerY = event.clientY - dragOffsetY - metrics.top;
+        const x = clamp((centerX / metrics.width) * metrics.naturalWidth, 0, metrics.naturalWidth);
+        const y = clamp((centerY / metrics.height) * metrics.naturalHeight, 0, metrics.naturalHeight);
+        setMarkerPosition(dragMarker, x, y);
+      });
+
+      window.addEventListener("pointerup", async () => {
+        if (!dragMarker) return;
+        dragMarker.classList.remove("dragging");
+        await savePoint(dragMarker);
+        dragMarker = null;
+      });
+
+      window.addEventListener("resize", () => {
+        markers.forEach((marker) => {
+          setMarkerPosition(marker, Number(marker.dataset.x), Number(marker.dataset.y));
+        });
+      });
+    })();
+  </script>
+  {% endif %}
+  {% if tab == 'cargar' %}
+  <script>
+    (function () {
+      const form = document.getElementById("upload-form");
+      const dropZone = document.getElementById("drop-zone");
+      const fileInput = document.getElementById("file-input");
+      const folderInput = document.getElementById("folder-input");
+      const statusEl = document.getElementById("drop-status");
+      const submitBtn = document.getElementById("submit-upload");
+      const IMAGE_EXT = /\.(jpe?g|png|webp|bmp)$/i;
+
+      if (!form || !dropZone || !fileInput) return;
+
+      let selectedFiles = [];
+
+      function isImageFile(name) {
+        return IMAGE_EXT.test(String(name || "").toLowerCase());
+      }
+
+      function fileWithPath(file) {
+        const path = file.webkitRelativePath || file.name;
+        if (path === file.name) return file;
+        return new File([file], path, {
+          type: file.type,
+          lastModified: file.lastModified,
+        });
+      }
+
+      function syncToInput() {
+        const dt = new DataTransfer();
+        selectedFiles.forEach((file) => dt.items.add(fileWithPath(file)));
+        fileInput.files = dt.files;
+      }
+
+      function updateStatus() {
+        if (!selectedFiles.length) {
+          statusEl.classList.add("hidden");
+          statusEl.textContent = "";
+          dropZone.classList.remove("has-files");
+          return;
+        }
+
+        dropZone.classList.add("has-files");
+        statusEl.classList.remove("hidden");
+        const preview = selectedFiles
+          .slice(0, 4)
+          .map((file) => file.webkitRelativePath || file.name)
+          .join(", ");
+        const extra =
+          selectedFiles.length > 4
+            ? ` y ${selectedFiles.length - 4} más`
+            : "";
+        statusEl.textContent = `${selectedFiles.length} imagen(es) listas: ${preview}${extra}`;
+      }
+
+      function setFiles(files) {
+        selectedFiles = files.filter((file) =>
+          isImageFile(file.webkitRelativePath || file.name)
+        );
+        syncToInput();
+        updateStatus();
+      }
+
+      function traverseEntry(entry, path, bucket) {
+        return new Promise((resolve) => {
+          if (entry.isFile) {
+            entry.file((file) => {
+              const rel = path ? `${path}/${file.name}` : file.name;
+              if (isImageFile(rel)) {
+                bucket.push(
+                  new File([file], rel, {
+                    type: file.type,
+                    lastModified: file.lastModified,
+                  })
+                );
+              }
+              resolve();
+            });
+            return;
+          }
+
+          if (!entry.isDirectory) {
+            resolve();
+            return;
+          }
+
+          const dirPath = path ? `${path}/${entry.name}` : entry.name;
+          const reader = entry.createReader();
+
+          function readBatch() {
+            reader.readEntries(async (entries) => {
+              if (!entries.length) {
+                resolve();
+                return;
+              }
+              for (const child of entries) {
+                await traverseEntry(child, dirPath, bucket);
+              }
+              readBatch();
+            });
+          }
+
+          readBatch();
+        });
+      }
+
+      async function collectFromDataTransfer(dataTransfer) {
+        const bucket = [];
+        const items = dataTransfer.items;
+
+        if (items && items.length) {
+          const tasks = [];
+          for (const item of items) {
+            if (item.kind !== "file") continue;
+            const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+            if (entry) {
+              tasks.push(traverseEntry(entry, "", bucket));
+            } else {
+              const file = item.getAsFile();
+              if (file && isImageFile(file.name)) bucket.push(file);
+            }
+          }
+          if (tasks.length) await Promise.all(tasks);
+          if (bucket.length) return bucket;
+        }
+
+        for (const file of dataTransfer.files) {
+          if (isImageFile(file.name)) bucket.push(file);
+        }
+        return bucket;
+      }
+
+      ["dragenter", "dragover"].forEach((eventName) => {
+        dropZone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dropZone.classList.add("dragover");
+        });
+      });
+
+      ["dragleave", "drop"].forEach((eventName) => {
+        dropZone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dropZone.classList.remove("dragover");
+        });
+      });
+
+      dropZone.addEventListener("drop", async (event) => {
+        const files = await collectFromDataTransfer(event.dataTransfer);
+        setFiles(files);
+      });
+
+      dropZone.addEventListener("click", () => fileInput.click());
+      dropZone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          fileInput.click();
+        }
+      });
+
+      document.getElementById("pick-images").addEventListener("click", () => {
+        fileInput.click();
+      });
+
+      document.getElementById("pick-folder").addEventListener("click", () => {
+        folderInput.click();
+      });
+
+      document.getElementById("clear-files").addEventListener("click", () => {
+        selectedFiles = [];
+        fileInput.value = "";
+        folderInput.value = "";
+        syncToInput();
+        updateStatus();
+      });
+
+      fileInput.addEventListener("change", () => {
+        setFiles([...fileInput.files]);
+      });
+
+      folderInput.addEventListener("change", () => {
+        setFiles([...folderInput.files]);
+      });
+
+      form.addEventListener("submit", (event) => {
+        if (!selectedFiles.length) {
+          event.preventDefault();
+          alert("Arrastra o selecciona al menos una imagen compatible.");
+          return;
+        }
+
+        syncToInput();
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Procesando...";
+      });
+    })();
+  </script>
+  {% endif %}
+</body>
+</html>

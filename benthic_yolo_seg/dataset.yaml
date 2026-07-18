@@ -1,0 +1,10 @@
+path: /Users/arath/Desktop/Imagenes_coralinas_train_yolo/benthic_yolo_seg
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: algas
+  1: corales
+  2: almejas
+  3: esponjas
+  4: arena

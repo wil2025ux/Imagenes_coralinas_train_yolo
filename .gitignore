@@ -1,0 +1,95 @@
+# --- Documentación pesada / no código (pedido del usuario) ---
+*.md
+*.pdf
+*.PDF
+*.doc
+*.docx
+*.pages
+*.key
+*.pptx
+*.tex
+
+# --- Entornos y caché ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- Pesos y modelos ---
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
+*.safetensors
+*.bin
+*.h5
+*.pkl
+*.joblib
+
+# --- Datos de imagen / datasets / salidas pesadas ---
+images/
+**/images/
+benthic_yolo_seg/
+!benthic_yolo_seg/dataset.yaml
+experimentos_seg3/
+runs/
+sam3_outputs*/
+**/figuras_reporte/
+**/*.JPG
+**/*.JPEG
+**/*.PNG
+**/*.jpg
+**/*.jpeg
+**/*.png
+**/*.tif
+**/*.tiff
+**/*.mp4
+**/*.avi
+**/*.mov
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/*.7z
+**/*.rar
+
+# --- App runtime / DB / logs ---
+coarcp_ia/data/
+coarcp_ia/static/results/
+*.sqlite
+*.db
+*.log
+
+# --- JSON/anotaciones grandes ---
+result_coco.json
+**/result_coco.json
+**/labels/
+
+# --- Notebooks con salidas embebidas (pesados) ---
+*.ipynb
+*.ipynb_checkpoints/
+
+# --- Entrega empaquetada ---
+ENTREGA_TESIS_SEGMENTACION_BENTONICA.zip
+ENTREGA_TESIS_SEGMENTACION_BENTONICA/datos/
+ENTREGA_TESIS_SEGMENTACION_BENTONICA/documentos/
+
+# --- HF / secrets ---
+.hf/
+*.env
+.env.*
+!.env.example

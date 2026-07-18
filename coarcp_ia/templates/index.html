@@ -1,0 +1,1391 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CoArrCP IA Flask</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body class="{% if tab == 'revision' %}review-mode{% endif %}">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">IA</div>
+      <div>
+        <h1>CoArrCP IA</h1>
+        <p>Segmentación bentónica</p>
+      </div>
+    </div>
+
+    {% set items = [
+      ('inicio', 'Inicio', '🏠'),
+      ('cargar', 'Cargar imágenes', '📁'),
+      ('inferencia', 'Inferencia IA', '🤖'),
+      ('revision', 'Revisión manual', '🖼️'),
+      ('componentes', 'Componentes', '🪸'),
+      ('bd', 'Base de datos', '🗃️'),
+      ('estadistica', 'Estadística', '📊'),
+      ('config', 'Configuración', '⚙️')
+    ] %}
+
+    <nav>
+      {% for key, label, icon in items %}
+      <a class="{{ 'active' if tab == key else '' }}" href="{{ url_for('index', tab=key, image_id=selected_image_id) }}">
+        <span>{{ icon }}</span>{{ label }}
+      </a>
+      {% endfor %}
+    </nav>
+
+    <div class="sidebar-footer">
+      {% if model_loaded %}
+        <span class="pill ok">Modelo cargado</span>
+      {% else %}
+        <span class="pill bad">Modelo no cargado</span>
+      {% endif %}
+      <small>{{ classes|length }} clase/s</small>
+    </div>
+  </aside>
+
+  <main class="main">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+      <div class="flash-zone">
+        {% for category, message in messages %}
+        <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    {% endwith %}
+
+    {% if tab == 'inicio' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Panel principal</h2>
+          <p>Flujo inspirado en CoArrCP: cargar imágenes, ejecutar IA, revisar resultados y generar estadísticas.</p>
+        </div>
+        <a class="button primary" href="{{ url_for('index', tab='cargar') }}">Cargar imágenes</a>
+      </div>
+
+      <div class="metrics">
+        <div class="metric"><span>{{ overview.total_images }}</span><label>Imágenes</label></div>
+        <div class="metric"><span>{{ overview.pending_images }}</span><label>Pendientes</label></div>
+        <div class="metric"><span>{{ overview.reviewed_images }}</span><label>Revisadas</label></div>
+        <div class="metric"><span>{{ overview.total_detections }}</span><label>Detecciones</label></div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h3>Últimas imágenes procesadas</h3>
+          {% if overview.latest_images %}
+          <div class="list">
+            {% for img in overview.latest_images %}
+            <a class="list-row" href="{{ url_for('index', tab='revision', image_id=img.id) }}">
+              <span>
+                <strong>{{ img.original_name }}</strong>
+                <small>{{ img.group_name or 'general' }} · {{ img.created_at }}</small>
+              </span>
+              <em>{{ img.status }}</em>
+            </a>
+            {% endfor %}
+          </div>
+          {% else %}
+            <p class="muted">Todavía no hay imágenes procesadas.</p>
+          {% endif %}
+        </div>
+
+        <div class="card">
+          <h3>Cobertura promedio por clase</h3>
+          {% if overview.avg_coverage %}
+          <table>
+            <thead><tr><th>Clase</th><th>Promedio %</th></tr></thead>
+            <tbody>
+              {% for row in overview.avg_coverage %}
+              <tr><td>{{ row.class_name }}</td><td>{{ row.avg_percent }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+            <p class="muted">Sin datos de cobertura todavía.</p>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'cargar' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Cargar imágenes</h2>
+          <p>Arrastra imágenes o carpetas, o selecciónalas manualmente. La app ejecutará YOLO-seg y guardará los resultados en SQLite.</p>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h3>Subir desde navegador</h3>
+          <form id="upload-form" method="post" action="{{ url_for('procesar') }}" enctype="multipart/form-data">
+            <input type="file" id="file-input" name="files" accept=".jpg,.jpeg,.png,.webp,.bmp" multiple hidden>
+            <input type="file" id="folder-input" accept=".jpg,.jpeg,.png,.webp,.bmp" webkitdirectory directory multiple hidden>
+
+            <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Arrastrar imágenes o carpetas">
+              <div class="drop-icon">📁</div>
+              <p class="drop-title"><strong>Arrastra imágenes o carpetas aquí</strong></p>
+              <p class="hint">Suelta uno o varios archivos, o una carpeta completa con subcarpetas.</p>
+              <p id="drop-status" class="drop-status hidden"></p>
+            </div>
+
+            <div class="file-actions">
+              <button type="button" class="button" id="pick-images">Seleccionar imágenes</button>
+              <button type="button" class="button" id="pick-folder">Seleccionar carpeta</button>
+              <button type="button" class="button ghost" id="clear-files">Limpiar</button>
+            </div>
+
+            <details class="advanced-options">
+              <summary>Parámetros avanzados (conf, iou, puntos)</summary>
+              <p class="hint">Ocultos por defecto para no distraer del flujo principal. Solo ajústalos si conoces el modelo.</p>
+              <div class="form-row">
+                <div>
+                  <label>conf — umbral de confianza</label>
+                  <input type="number" step="0.01" min="0" max="1" name="conf" value="0.25">
+                </div>
+                <div>
+                  <label>iou — supresión de duplicados</label>
+                  <input type="number" step="0.01" min="0" max="1" name="iou" value="0.50">
+                </div>
+                <div>
+                  <label>Puntos de conteo</label>
+                  <input type="number" min="1" max="100" name="point_count" value="13">
+                </div>
+              </div>
+            </details>
+
+            <button class="button primary" type="submit" id="submit-upload">Procesar con IA</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h3>Procesar carpeta local del servidor</h3>
+          <form method="post" action="{{ url_for('procesar_carpeta_servidor') }}">
+            <label>Ruta de carpeta</label>
+            <input type="text" name="folder_path" placeholder="/Users/arath/imagenes_arrecife">
+            <p class="hint">Útil cuando Flask corre en tu propia computadora y quieres leer una carpeta directamente.</p>
+
+            <div class="form-row">
+              <div>
+                <label>conf</label>
+                <input type="number" step="0.01" min="0" max="1" name="conf" value="0.25">
+              </div>
+              <div>
+                <label>iou</label>
+                <input type="number" step="0.01" min="0" max="1" name="iou" value="0.50">
+              </div>
+              <div>
+                <label>Puntos</label>
+                <input type="number" min="1" max="100" name="point_count" value="13">
+              </div>
+            </div>
+
+            <label class="check"><input type="checkbox" name="recursive"> Incluir subcarpetas</label>
+            <button class="button" type="submit">Procesar carpeta</button>
+          </form>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'inferencia' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Inferencia IA</h2>
+          <p>Resultados de segmentación, cobertura, detecciones y puntos generados automáticamente.</p>
+        </div>
+        <a class="button primary" href="{{ url_for('index', tab='cargar') }}">Nueva inferencia</a>
+      </div>
+
+      <div class="card">
+        <h3>Imágenes procesadas</h3>
+        {% if images %}
+        <table>
+          <thead>
+            <tr>
+              <th>Imagen</th><th>Grupo</th><th>Estado</th><th>Detecciones</th><th>Tiempo</th><th>Acción</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for img in images %}
+            <tr>
+              <td>{{ img.original_name }}</td>
+              <td>{{ img.group_name or 'general' }}</td>
+              <td><span class="tag">{{ img.status }}</span></td>
+              <td>{{ img.num_detections or 0 }}</td>
+              <td>{{ img.processing_ms or 0 }} ms</td>
+              <td><a class="button small" href="{{ url_for('index', tab='revision', image_id=img.id) }}">Revisar</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">No hay imágenes procesadas.</p>
+        {% endif %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'revision' %}
+    <section class="section review-workspace">
+      {% if detail and detail.image %}
+      <div class="review-toolbar" id="review-toolbar">
+        <div class="review-toolbar-left">
+          <span class="review-counter" id="review-counter">—</span>
+          <span class="review-filename">{{ detail.image.original_name }}</span>
+          <span class="tag" id="review-status-tag">{{ detail.image.status }}</span>
+        </div>
+        <div class="review-toolbar-actions">
+          <a class="button small primary" href="{{ url_for('index', tab='inicio') }}" id="btn-menu" title="Menú principal (Esc)">Menú</a>
+          <button type="button" class="button small ghost" id="btn-prev" title="Imagen anterior (J / ←)">← Ant.</button>
+          <button type="button" class="button small ghost" id="btn-next" title="Imagen siguiente (K / →)">Sig. →</button>
+          <button type="button" class="button small" id="btn-add-point" title="Agregar punto (A)">+ Punto</button>
+          <button type="button" class="button small" id="btn-reviewed" title="Marcar revisada (R)">Revisada</button>
+          <button type="button" class="button small ghost" id="btn-pending" title="Marcar pendiente (U)">Pendiente</button>
+          <a class="button small" id="btn-download" href="{{ url_for('descargar_resultado', image_id=detail.image.id) }}" title="Descargar (D)">Descargar</a>
+          <button type="button" class="button small ghost" id="btn-data" title="Mostrar datos (G)">Datos</button>
+          <button type="button" class="button small ghost" id="btn-strip" title="Lista imágenes (L)">Lista</button>
+          <button type="button" class="button small ghost" id="btn-help" title="Atajos (?)">?</button>
+        </div>
+      </div>
+
+      <div class="review-layout">
+        <aside class="review-strip" id="review-strip">
+          <p class="strip-title">Imágenes</p>
+          {% if images %}
+          <div class="list compact">
+            {% for img in images %}
+            <a class="list-row {{ 'selected' if selected_image_id == img.id else '' }}" href="{{ url_for('index', tab='revision', image_id=img.id) }}" data-image-id="{{ img.id }}">
+              <span>
+                <strong>{{ img.original_name }}</strong>
+                <small>{{ img.status }}</small>
+              </span>
+            </a>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </aside>
+
+        <div class="review-stage">
+          {% if detail.image.result_path %}
+          <div
+            id="point-editor"
+            class="point-editor"
+            data-image-id="{{ detail.image.id }}"
+            data-width="{{ detail.image.width }}"
+            data-height="{{ detail.image.height }}"
+          >
+            <img
+              id="review-image"
+              class="result-img review-hero"
+              src="{{ url_for('static', filename=detail.image.result_path) }}?v={{ preview_cache or detail.run.id }}"
+              alt="Imagen bentónica etiquetada"
+            >
+            <div id="point-overlay" class="point-overlay">
+              <img id="sam3-mask-layer" class="sam3-mask-layer hidden" alt="Máscara SAM3">
+              {% for p in detail.points %}
+              <button
+                type="button"
+                class="point-marker {{ p.status or 'sin_deteccion' }}{% if p.mask_path %} has-mask{% endif %}"
+                data-point-index="{{ p.point_index }}"
+                data-point-name="{{ p.point_name or ('P' ~ p.point_index) }}"
+                data-class-name="{{ p.class_name or '' }}"
+                data-manual-label="{{ p.manual_label or 0 }}"
+                data-mask-path="{{ p.mask_path or '' }}"
+                data-x="{{ p.x }}"
+                data-y="{{ p.y }}"
+                style="left: {{ (100 * p.x / detail.image.width) if detail.image.width else 0 }}%; top: {{ (100 * p.y / detail.image.height) if detail.image.height else 0 }}%;"
+                title="{{ p.point_name or ('P' ~ p.point_index) }}: {{ p.class_name or 'Sin etiqueta' }}{% if p.mask_path %} · máscara SAM3{% endif %}"
+              >{{ p.point_name or ('P' ~ p.point_index) }}</button>
+              {% endfor %}
+            </div>
+          </div>
+          <p id="point-save-status" class="point-save-status">Arrastra puntos · A = agregar · selecciona uno para editar nombre/componente</p>
+          {% endif %}
+        </div>
+
+        <aside class="review-data" id="review-data">
+          <div class="point-edit-panel" id="point-edit-panel">
+            <h3>Punto seleccionado</h3>
+            <p class="muted" id="point-edit-empty">Haz clic en un punto para editarlo.</p>
+            <div id="point-edit-form" class="hidden">
+              <label>Nombre libre</label>
+              <input type="text" id="edit-point-name" placeholder="P1, esquina NW...">
+              <label>Componente / clase</label>
+              <select id="edit-point-class">
+                <option value="">Sin etiqueta</option>
+                {% for c in components %}
+                <option value="{{ c.class_name }}">{{ c.component_name or c.class_name }}</option>
+                {% endfor %}
+              </select>
+              <div class="form-row compact-row">
+                <input type="text" id="edit-new-class" placeholder="Nueva etiqueta...">
+                <button type="button" class="button small" id="btn-create-class">Crear</button>
+              </div>
+              <div class="file-actions">
+                <button type="button" class="button small primary" id="btn-save-point-meta">Guardar</button>
+                <button type="button" class="button small" id="btn-sam3-mask" title="Generar máscara con SAM3 (S)">Máscara SAM3</button>
+                <button type="button" class="button small ghost" id="btn-delete-point">Eliminar</button>
+              </div>
+              <p id="sam3-point-status" class="hint">
+                SAM3:
+                {% if sam3 and sam3.loaded %}listo ({{ sam3.device }})
+                {% elif sam3 and sam3.error %}{{ sam3.error }}
+                {% else %}se carga al primer uso (requiere acceso HF a facebook/sam3)
+                {% endif %}
+              </p>
+              <div id="sam3-mask-preview" class="sam3-mask-preview hidden"></div>
+            </div>
+          </div>
+
+          <h3>Cobertura</h3>
+          <table>
+            <thead><tr><th>Clase</th><th>%</th></tr></thead>
+            <tbody>
+            {% for row in detail.coverage %}
+              <tr><td>{{ row.class_name }}</td><td>{{ row.percent }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+
+          <h3>Puntos de conteo</h3>
+          <table>
+            <thead><tr><th>Nombre</th><th>Componente</th><th>Estado</th></tr></thead>
+            <tbody id="points-table-body">
+            {% for p in detail.points %}
+              <tr class="point-row" data-point-index="{{ p.point_index }}">
+                <td class="point-name">{{ p.point_name or ('P' ~ p.point_index) }}</td>
+                <td class="point-class">{{ p.class_name or 'Sin etiqueta' }}</td>
+                <td class="point-status">{{ p.status }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </aside>
+      </div>
+
+      <script id="review-nav-data" type="application/json">{{ review_nav | tojson }}</script>
+      <script id="catalog-data" type="application/json">[
+        {%- for c in components -%}
+        {{ c.class_name | tojson }}{% if not loop.last %},{% endif %}
+        {%- endfor -%}
+      ]</script>
+
+      <dialog id="shortcuts-dialog" class="shortcuts-dialog">
+        <h3>Atajos de teclado — flujo experto</h3>
+        <table>
+          <tr><td><kbd>J</kbd> / <kbd>←</kbd></td><td>Imagen anterior</td></tr>
+          <tr><td><kbd>K</kbd> / <kbd>→</kbd></td><td>Imagen siguiente</td></tr>
+          <tr><td><kbd>A</kbd></td><td>Modo agregar punto (click en imagen)</td></tr>
+          <tr><td><kbd>S</kbd></td><td>Generar máscara SAM3 del punto seleccionado</td></tr>
+          <tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Seleccionar punto de conteo</td></tr>
+          <tr><td><kbd>R</kbd></td><td>Marcar imagen como revisada</td></tr>
+          <tr><td><kbd>U</kbd></td><td>Marcar como pendiente</td></tr>
+          <tr><td><kbd>D</kbd></td><td>Descargar imagen etiquetada</td></tr>
+          <tr><td><kbd>G</kbd></td><td>Mostrar/ocultar panel de datos</td></tr>
+          <tr><td><kbd>L</kbd></td><td>Mostrar/ocultar lista de imágenes</td></tr>
+          <tr><td><kbd>F</kbd></td><td>Modo foco (oculta menú lateral)</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Volver al menú principal</td></tr>
+          <tr><td><kbd>?</kbd></td><td>Esta ayuda</td></tr>
+        </table>
+        <p class="hint">Puedes etiquetar puntos sin clasificación YOLO previa. Verde=IA, azul=manual, rojo=sin etiqueta.</p>
+        <button type="button" class="button primary" id="close-shortcuts">Cerrar</button>
+      </dialog>
+      {% else %}
+      <div class="header">
+        <div>
+          <h2>Revisión manual</h2>
+          <p>Selecciona una imagen procesada. La fotografía ocupará toda la pantalla en modo foco.</p>
+        </div>
+      </div>
+      <div class="card">
+        {% if images %}
+        <div class="list compact">
+          {% for img in images %}
+          <a class="list-row" href="{{ url_for('index', tab='revision', image_id=img.id) }}">
+            <span><strong>{{ img.original_name }}</strong><small>{{ img.status }}</small></span>
+          </a>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="muted">Carga imágenes primero en la pestaña Cargar imágenes.</p>
+        {% endif %}
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+
+    {% if tab == 'componentes' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Componentes bentónicos</h2>
+          <p>Catálogo de etiquetas: edita el mapeo CoArrCP o crea nuevas clases libres para etiquetar puntos.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Agregar etiqueta al catálogo</h3>
+        <form method="post" action="{{ url_for('crear_catalogo_form') }}" class="form-row">
+          <div>
+            <label>Nombre de clase</label>
+            <input type="text" name="class_name" placeholder="ej. coral_blando" required>
+          </div>
+          <div>
+            <label>Componente CoArrCP</label>
+            <input type="text" name="component_name" placeholder="Nombre visible">
+          </div>
+          <div style="align-self:end">
+            <button class="button primary" type="submit">Crear</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        {% if components %}
+        <form method="post" action="{{ url_for('guardar_componentes') }}">
+          <table>
+            <thead>
+              <tr>
+                <th>Clase / etiqueta</th>
+                <th>Componente CoArrCP</th>
+                <th>GGMF</th>
+                <th>GMF</th>
+                <th>Notas</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for c in components %}
+              <tr>
+                <td>
+                  <strong>{{ c.class_name }}</strong>
+                  <input type="hidden" name="class_name" value="{{ c.class_name }}">
+                </td>
+                <td><input type="text" name="component_name" value="{{ c.component_name }}"></td>
+                <td><input type="text" name="ggmf" value="{{ c.ggmf or '' }}" placeholder="Sustrato / Scleractinia / ..."></td>
+                <td><input type="text" name="gmf" value="{{ c.gmf or '' }}"></td>
+                <td><input type="text" name="notes" value="{{ c.notes or '' }}"></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <button class="button primary" type="submit">Guardar componentes</button>
+        </form>
+        {% else %}
+        <p class="muted">Carga el modelo o crea una etiqueta nueva para iniciar el catálogo.</p>
+        {% endif %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'bd' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Base de datos</h2>
+          <p>La información del proyecto se guarda en SQLite para mantener imágenes, inferencias, detecciones, puntos y componentes.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Archivo SQLite</h3>
+        <code>{{ db_path }}</code>
+        <div class="metrics small-metrics">
+          <div class="metric"><span>{{ overview.total_images }}</span><label>Imágenes</label></div>
+          <div class="metric"><span>{{ overview.total_detections }}</span><label>Detecciones</label></div>
+          <div class="metric"><span>{{ classes|length }}</span><label>Clases IA</label></div>
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'estadistica' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Estadística</h2>
+          <p>Resumen global de cobertura y frecuencia de clases detectadas.</p>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h3>Cobertura promedio global</h3>
+          {% if overview.avg_coverage %}
+          <table>
+            <thead><tr><th>Clase</th><th>Promedio %</th></tr></thead>
+            <tbody>
+              {% for row in overview.avg_coverage %}
+              <tr><td>{{ row.class_name }}</td><td>{{ row.avg_percent }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="muted">Sin coberturas todavía.</p>
+          {% endif %}
+        </div>
+
+        <div class="card">
+          <h3>Frecuencia de detecciones</h3>
+          {% if overview.top_classes %}
+          <table>
+            <thead><tr><th>Clase</th><th>Detecciones</th></tr></thead>
+            <tbody>
+              {% for row in overview.top_classes %}
+              <tr><td>{{ row.class_name }}</td><td>{{ row.total }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="muted">Sin detecciones todavía.</p>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+    {% endif %}
+
+    {% if tab == 'config' %}
+    <section class="section">
+      <div class="header">
+        <div>
+          <h2>Configuración</h2>
+          <p>Estado del modelo, catálogo de correcciones y reentrenamiento.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Modelo YOLO-seg</h3>
+        <p><strong>Estado:</strong> {{ 'Cargado' if model_loaded else 'No cargado' }}</p>
+        <p><strong>Pesos:</strong> <code>{{ weights_loaded or 'No disponible' }}</code></p>
+        <p><strong>Clases:</strong> {{ classes|join(', ') if classes else 'Sin clases' }}</p>
+        <p class="hint">Para cambiar el modelo base, reinicia con <code>python3 run.py --weights ruta/best.pt</code>.</p>
+      </div>
+
+      <div class="card">
+        <h3>Asistente SAM3</h3>
+        <p class="hint">En Revisión: selecciona un punto y pulsa <strong>Máscara SAM3</strong> (o tecla <kbd>S</kbd>) para generar la máscara del componente bajo el punto.</p>
+        <p>
+          Estado:
+          {% if sam3 and sam3.loaded %}
+            <span class="pill ok">Cargado ({{ sam3.device }})</span>
+          {% else %}
+            <span class="pill">No cargado</span>
+          {% endif %}
+        </p>
+        {% if sam3 and sam3.error %}<p class="hint error-text">{{ sam3.error }}</p>{% endif %}
+        <button type="button" class="button" id="btn-sam3-preload">Precargar SAM3</button>
+        <p id="sam3-config-status" class="point-save-status"></p>
+      </div>
+
+      <div class="card">
+        <h3>Reentrenar con correcciones</h3>
+        <p class="hint">
+          Usa supervisión débil: discos circulares alrededor de cada punto etiquetado manualmente.
+          No sustituye un etiquetado poligonal completo, pero permite mejorar el modelo con correcciones CoArrCP.
+        </p>
+        <p>
+          Correcciones disponibles:
+          <strong>{{ correction_stats.num_points if correction_stats else 0 }}</strong> puntos en
+          <strong>{{ correction_stats.num_images if correction_stats else 0 }}</strong> imágenes.
+        </p>
+        <div class="form-row">
+          <div>
+            <label>Épocas</label>
+            <input type="number" id="retrain-epochs" min="1" max="300" value="30">
+          </div>
+          <div>
+            <label>imgsz</label>
+            <input type="number" id="retrain-imgsz" min="320" max="1280" step="32" value="640">
+          </div>
+          <div>
+            <label>batch</label>
+            <input type="number" id="retrain-batch" min="1" max="16" value="2">
+          </div>
+          <div>
+            <label>Radio disco (ratio)</label>
+            <input type="number" id="retrain-radius" min="0.01" max="0.2" step="0.01" value="0.04">
+          </div>
+        </div>
+        <div class="file-actions">
+          <button type="button" class="button primary" id="btn-retrain-start">Reentrenar con correcciones</button>
+          <button type="button" class="button" id="btn-retrain-activate" {% if not latest_retrain_job or latest_retrain_job.status != 'done' %}disabled{% endif %}>
+            Activar pesos nuevos
+          </button>
+        </div>
+        <p id="retrain-status" class="point-save-status">
+          {% if latest_retrain_job %}
+            Último job #{{ latest_retrain_job.id }}: {{ latest_retrain_job.status }}
+            {% if latest_retrain_job.error %} — {{ latest_retrain_job.error }}{% endif %}
+            {% if latest_retrain_job.weights_out %} — {{ latest_retrain_job.weights_out }}{% endif %}
+          {% else %}
+            Sin jobs de reentrenamiento todavía.
+          {% endif %}
+        </p>
+      </div>
+    </section>
+    <script>
+      (function () {
+        const statusEl = document.getElementById("retrain-status");
+        const btnStart = document.getElementById("btn-retrain-start");
+        const btnActivate = document.getElementById("btn-retrain-activate");
+        let pollTimer = null;
+        let currentJobId = {{ latest_retrain_job.id if latest_retrain_job else 'null' }};
+
+        async function refreshStatus() {
+          const qs = currentJobId ? `?job_id=${currentJobId}` : "";
+          const res = await fetch(`/api/retrain/status${qs}`);
+          const data = await res.json();
+          const job = data.job;
+          if (!job) return;
+          currentJobId = job.id;
+          let text = `Job #${job.id}: ${job.status}`;
+          if (job.num_points) text += ` · ${job.num_points} puntos / ${job.num_images} imgs`;
+          if (job.error) text += ` — ${job.error}`;
+          if (job.weights_out) text += ` — ${job.weights_out}`;
+          statusEl.textContent = text;
+          btnActivate.disabled = job.status !== "done";
+          if (job.status === "running" || job.status === "queued") {
+            if (!pollTimer) pollTimer = setInterval(refreshStatus, 4000);
+          } else if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+          }
+        }
+
+        btnStart?.addEventListener("click", async () => {
+          statusEl.textContent = "Iniciando reentrenamiento...";
+          btnStart.disabled = true;
+          try {
+            const res = await fetch("/api/retrain/start", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                epochs: Number(document.getElementById("retrain-epochs").value),
+                imgsz: Number(document.getElementById("retrain-imgsz").value),
+                batch: Number(document.getElementById("retrain-batch").value),
+                radius_ratio: Number(document.getElementById("retrain-radius").value),
+              }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "No se pudo iniciar.");
+            currentJobId = data.job_id;
+            statusEl.textContent = `Job #${data.job_id} en cola (${data.stats.num_points} puntos).`;
+            refreshStatus();
+          } catch (err) {
+            statusEl.textContent = err.message;
+            statusEl.classList.add("error");
+          } finally {
+            btnStart.disabled = false;
+          }
+        });
+
+        btnActivate?.addEventListener("click", async () => {
+          statusEl.textContent = "Activando pesos...";
+          try {
+            const res = await fetch("/api/retrain/activate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ job_id: currentJobId }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "No se pudo activar.");
+            statusEl.textContent = `Pesos activos: ${data.weights}`;
+            statusEl.classList.remove("error");
+          } catch (err) {
+            statusEl.textContent = err.message;
+            statusEl.classList.add("error");
+          }
+        });
+
+        if (currentJobId) refreshStatus();
+
+        document.getElementById("btn-sam3-preload")?.addEventListener("click", async () => {
+          const el = document.getElementById("sam3-config-status");
+          if (el) el.textContent = "Cargando SAM3...";
+          try {
+            const res = await fetch("/api/sam3/load", { method: "POST" });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "No se pudo cargar SAM3.");
+            if (el) el.textContent = `SAM3 listo en ${data.device}.`;
+          } catch (err) {
+            if (el) {
+              el.textContent = err.message;
+              el.classList.add("error");
+            }
+          }
+        });
+      })();
+    </script>
+    {% endif %}
+  </main>
+  {% if tab == 'revision' %}
+  <script>
+    (function () {
+      const editor = document.getElementById("point-editor");
+      if (!editor) return;
+
+      const navData = JSON.parse(document.getElementById("review-nav-data")?.textContent || "[]");
+      const imageId = Number(editor.dataset.imageId);
+      const image = document.getElementById("review-image");
+      const overlay = document.getElementById("point-overlay");
+      const statusEl = document.getElementById("point-save-status");
+      const statusTag = document.getElementById("review-status-tag");
+      const counterEl = document.getElementById("review-counter");
+      const tableBody = document.getElementById("points-table-body");
+      const strip = document.getElementById("review-strip");
+      const dataPanel = document.getElementById("review-data");
+      const dialog = document.getElementById("shortcuts-dialog");
+      const downloadBtn = document.getElementById("btn-download");
+      const editEmpty = document.getElementById("point-edit-empty");
+      const editForm = document.getElementById("point-edit-form");
+      const editName = document.getElementById("edit-point-name");
+      const editClass = document.getElementById("edit-point-class");
+      const editNewClass = document.getElementById("edit-new-class");
+      const btnAdd = document.getElementById("btn-add-point");
+
+      let markers = [...editor.querySelectorAll(".point-marker")];
+      let rows = [...document.querySelectorAll(".point-row")];
+      let dragMarker = null;
+      let dragOffsetX = 0;
+      let dragOffsetY = 0;
+      let addMode = false;
+      let selectedIndex = null;
+      let didDrag = false;
+
+      const currentIndex = navData.findIndex((item) => item.id === imageId);
+      if (counterEl && currentIndex >= 0) {
+        counterEl.textContent = `${currentIndex + 1} / ${navData.length}`;
+      }
+
+      function goToImage(offset) {
+        if (!navData.length) return;
+        const nextIndex = currentIndex + offset;
+        if (nextIndex < 0 || nextIndex >= navData.length) return;
+        window.location.href = `/?tab=revision&image_id=${navData[nextIndex].id}`;
+      }
+
+      function togglePanel(panelClass) {
+        document.body.classList.toggle(panelClass);
+        syncPanelButtons();
+      }
+
+      function syncPanelButtons() {
+        const listOpen = document.body.classList.contains("panel-list-open");
+        const dataOpen = document.body.classList.contains("panel-data-open");
+        document.getElementById("btn-strip")?.classList.toggle("active", listOpen);
+        document.getElementById("btn-data")?.classList.toggle("active", dataOpen);
+      }
+
+      function toggleFocus() {
+        document.body.classList.toggle("workspace-focus");
+      }
+
+      function exitToMenu() {
+        document.body.classList.remove("workspace-focus", "panel-list-open", "panel-data-open", "sidebar-open");
+        window.location.href = "/?tab=inicio";
+      }
+
+      async function setStatus(status) {
+        const response = await fetch(`/api/imagen/${imageId}/estado`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "No se pudo actualizar el estado.");
+        if (statusTag) statusTag.textContent = status;
+        statusEl.textContent = status === "revisado" ? "Imagen marcada como revisada." : "Imagen marcada como pendiente.";
+      }
+
+      function imageMetrics() {
+        const rect = image.getBoundingClientRect();
+        return {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          naturalWidth: image.naturalWidth || Number(editor.dataset.width),
+          naturalHeight: image.naturalHeight || Number(editor.dataset.height),
+        };
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(Math.max(value, min), max);
+      }
+
+      function setMarkerPosition(marker, x, y) {
+        const metrics = imageMetrics();
+        marker.style.left = `${(x / metrics.naturalWidth) * 100}%`;
+        marker.style.top = `${(y / metrics.naturalHeight) * 100}%`;
+        marker.dataset.x = String(x);
+        marker.dataset.y = String(y);
+      }
+
+      function statusClass(status) {
+        if (status === "detectado") return "detectado";
+        if (status === "manual") return "manual";
+        return "sin_deteccion";
+      }
+
+      function ensureClassOption(className) {
+        if (!className || !editClass) return;
+        const exists = [...editClass.options].some((opt) => opt.value === className);
+        if (!exists) {
+          const opt = document.createElement("option");
+          opt.value = className;
+          opt.textContent = className;
+          editClass.appendChild(opt);
+        }
+      }
+
+      function highlightPoint(pointIndex) {
+        selectedIndex = Number(pointIndex);
+        markers.forEach((marker) => {
+          marker.classList.toggle("active", marker.dataset.pointIndex === String(pointIndex));
+        });
+        rows.forEach((row) => {
+          row.classList.toggle("active", row.dataset.pointIndex === String(pointIndex));
+        });
+        const marker = markers.find((m) => m.dataset.pointIndex === String(pointIndex));
+        if (!marker || !editForm) return;
+        editEmpty?.classList.add("hidden");
+        editForm.classList.remove("hidden");
+        editName.value = marker.dataset.pointName || `P${pointIndex}`;
+        ensureClassOption(marker.dataset.className || "");
+        editClass.value = marker.dataset.className || "";
+        document.body.classList.add("panel-data-open");
+        syncPanelButtons();
+      }
+
+      function rebuildFromPoints(points) {
+        if (!overlay || !tableBody) return;
+        overlay.innerHTML = "";
+        tableBody.innerHTML = "";
+        points.forEach((p) => {
+          const marker = document.createElement("button");
+          marker.type = "button";
+          marker.className = `point-marker ${statusClass(p.status)}`;
+          marker.dataset.pointIndex = String(p.point_index);
+          marker.dataset.pointName = p.point_name || `P${p.point_index}`;
+          marker.dataset.className = p.class_name || "";
+          marker.dataset.manualLabel = String(p.manual_label || 0);
+          marker.dataset.x = String(p.x);
+          marker.dataset.y = String(p.y);
+          marker.textContent = p.point_name || `P${p.point_index}`;
+          marker.title = `${marker.dataset.pointName}: ${p.class_name || "Sin etiqueta"}`;
+          setMarkerPosition(marker, Number(p.x), Number(p.y));
+          overlay.appendChild(marker);
+
+          const tr = document.createElement("tr");
+          tr.className = "point-row";
+          tr.dataset.pointIndex = String(p.point_index);
+          tr.innerHTML = `
+            <td class="point-name">${p.point_name || ("P" + p.point_index)}</td>
+            <td class="point-class">${p.class_name || "Sin etiqueta"}</td>
+            <td class="point-status">${p.status || ""}</td>`;
+          tableBody.appendChild(tr);
+          ensureClassOption(p.class_name || "");
+        });
+        markers = [...overlay.querySelectorAll(".point-marker")];
+        rows = [...tableBody.querySelectorAll(".point-row")];
+        bindMarkerEvents();
+        bindRowEvents();
+        if (selectedIndex != null) highlightPoint(selectedIndex);
+      }
+
+      async function savePointCoords(marker) {
+        statusEl.textContent = "Guardando punto...";
+        statusEl.classList.remove("error");
+        try {
+          const payload = {
+            point_index: Number(marker.dataset.pointIndex),
+            x: Number(marker.dataset.x),
+            y: Number(marker.dataset.y),
+            point_name: marker.dataset.pointName,
+          };
+          if (Number(marker.dataset.manualLabel) === 1) {
+            payload.manual_label = 1;
+            payload.class_name = marker.dataset.className || null;
+          }
+          const response = await fetch(`/imagen/${imageId}/puntos`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ points: [payload] }),
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || "No se pudo guardar el punto.");
+          rebuildFromPoints(data.points || []);
+          statusEl.textContent = "Punto actualizado.";
+        } catch (error) {
+          statusEl.textContent = error.message;
+          statusEl.classList.add("error");
+        }
+      }
+
+      function bindMarkerEvents() {
+        markers.forEach((marker) => {
+          marker.onpointerdown = (event) => {
+            if (addMode) return;
+            event.preventDefault();
+            event.stopPropagation();
+            didDrag = false;
+            dragMarker = marker;
+            marker.setPointerCapture(event.pointerId);
+            highlightPoint(marker.dataset.pointIndex);
+            const rect = marker.getBoundingClientRect();
+            dragOffsetX = event.clientX - (rect.left + rect.width / 2);
+            dragOffsetY = event.clientY - (rect.top + rect.height / 2);
+            marker.classList.add("dragging");
+          };
+          marker.onclick = (event) => {
+            event.stopPropagation();
+            if (!didDrag) highlightPoint(marker.dataset.pointIndex);
+          };
+        });
+      }
+
+      function bindRowEvents() {
+        rows.forEach((row) => {
+          row.onclick = () => highlightPoint(row.dataset.pointIndex);
+        });
+      }
+
+      bindMarkerEvents();
+      bindRowEvents();
+
+      window.addEventListener("pointermove", (event) => {
+        if (!dragMarker) return;
+        didDrag = true;
+        const metrics = imageMetrics();
+        const centerX = event.clientX - dragOffsetX - metrics.left;
+        const centerY = event.clientY - dragOffsetY - metrics.top;
+        setMarkerPosition(
+          dragMarker,
+          clamp((centerX / metrics.width) * metrics.naturalWidth, 0, metrics.naturalWidth),
+          clamp((centerY / metrics.height) * metrics.naturalHeight, 0, metrics.naturalHeight)
+        );
+      });
+
+      window.addEventListener("pointerup", async () => {
+        if (!dragMarker) return;
+        dragMarker.classList.remove("dragging");
+        const marker = dragMarker;
+        dragMarker = null;
+        if (didDrag) await savePointCoords(marker);
+      });
+
+      window.addEventListener("resize", () => {
+        markers.forEach((marker) => {
+          setMarkerPosition(marker, Number(marker.dataset.x), Number(marker.dataset.y));
+        });
+      });
+
+      function setAddMode(on) {
+        addMode = on;
+        editor.classList.toggle("add-mode", on);
+        btnAdd?.classList.toggle("active", on);
+        statusEl.textContent = on
+          ? "Modo agregar: haz clic sobre la imagen para crear un punto."
+          : "Arrastra puntos · A = agregar · selecciona uno para editar nombre/componente";
+      }
+
+      btnAdd?.addEventListener("click", () => setAddMode(!addMode));
+
+      editor.addEventListener("click", async (event) => {
+        if (!addMode) return;
+        if (event.target.closest(".point-marker")) return;
+        const metrics = imageMetrics();
+        const x = clamp(((event.clientX - metrics.left) / metrics.width) * metrics.naturalWidth, 0, metrics.naturalWidth);
+        const y = clamp(((event.clientY - metrics.top) / metrics.height) * metrics.naturalHeight, 0, metrics.naturalHeight);
+        statusEl.textContent = "Agregando punto...";
+        try {
+          const res = await fetch(`/imagen/${imageId}/puntos/agregar`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ x, y }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "No se pudo agregar.");
+          rebuildFromPoints(data.points || []);
+          const last = (data.points || []).slice(-1)[0];
+          if (last) highlightPoint(last.point_index);
+          statusEl.textContent = "Punto agregado. Asigna un componente si quieres.";
+          setAddMode(false);
+        } catch (err) {
+          statusEl.textContent = err.message;
+          statusEl.classList.add("error");
+        }
+      });
+
+      document.getElementById("btn-save-point-meta")?.addEventListener("click", async () => {
+        if (selectedIndex == null) return;
+        const marker = markers.find((m) => m.dataset.pointIndex === String(selectedIndex));
+        if (!marker) return;
+        statusEl.textContent = "Guardando etiqueta...";
+        try {
+          const res = await fetch(`/imagen/${imageId}/puntos`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              points: [{
+                point_index: selectedIndex,
+                x: Number(marker.dataset.x),
+                y: Number(marker.dataset.y),
+                point_name: editName.value.trim() || `P${selectedIndex}`,
+                class_name: editClass.value || null,
+                manual_label: editClass.value ? 1 : 0,
+              }],
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "No se pudo guardar.");
+          rebuildFromPoints(data.points || []);
+          statusEl.textContent = "Etiqueta guardada.";
+        } catch (err) {
+          statusEl.textContent = err.message;
+          statusEl.classList.add("error");
+        }
+      });
+
+      document.getElementById("btn-delete-point")?.addEventListener("click", async () => {
+        if (selectedIndex == null) return;
+        if (!confirm(`¿Eliminar el punto ${selectedIndex}?`)) return;
+        try {
+          const res = await fetch(`/imagen/${imageId}/puntos/eliminar`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ point_index: selectedIndex }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "No se pudo eliminar.");
+          selectedIndex = null;
+          editForm?.classList.add("hidden");
+          editEmpty?.classList.remove("hidden");
+          rebuildFromPoints(data.points || []);
+          statusEl.textContent = "Punto eliminado.";
+        } catch (err) {
+          statusEl.textContent = err.message;
+          statusEl.classList.add("error");
+        }
+      });
+
+      document.getElementById("btn-create-class")?.addEventListener("click", async () => {
+        const name = (editNewClass.value || "").trim();
+        if (!name) return;
+        try {
+          const res = await fetch("/catalogo/crear", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ class_name: name, component_name: name }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "No se pudo crear.");
+          ensureClassOption(data.component.class_name);
+          editClass.value = data.component.class_name;
+          editNewClass.value = "";
+          statusEl.textContent = `Etiqueta '${data.component.class_name}' creada.`;
+        } catch (err) {
+          statusEl.textContent = err.message;
+          statusEl.classList.add("error");
+        }
+      });
+
+      const sam3StatusEl = document.getElementById("sam3-point-status");
+      const sam3Preview = document.getElementById("sam3-mask-preview");
+      const sam3Layer = document.getElementById("sam3-mask-layer");
+
+      async function generateSam3Mask() {
+        if (selectedIndex == null) {
+          statusEl.textContent = "Selecciona un punto primero.";
+          return;
+        }
+        const marker = markers.find((m) => m.dataset.pointIndex === String(selectedIndex));
+        if (!marker) return;
+        statusEl.textContent = "Generando máscara SAM3 (puede tardar la primera vez)...";
+        statusEl.classList.remove("error");
+        if (sam3StatusEl) sam3StatusEl.textContent = "SAM3: generando...";
+        try {
+          const res = await fetch(`/imagen/${imageId}/puntos/sam3`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              point_index: selectedIndex,
+              x: Number(marker.dataset.x),
+              y: Number(marker.dataset.y),
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "SAM3 no disponible.");
+          rebuildFromPoints(data.points || []);
+          if (data.overlay_url && sam3Layer) {
+            sam3Layer.src = data.overlay_url;
+            sam3Layer.classList.remove("hidden");
+          }
+          if (sam3Preview) {
+            sam3Preview.classList.remove("hidden");
+            sam3Preview.innerHTML = data.mask_png
+              ? `<img src="${data.mask_png}" alt="máscara"><small>score ${Number(data.mask_score || 0).toFixed(3)}</small>`
+              : "";
+          }
+          if (sam3StatusEl) {
+            sam3StatusEl.textContent = `SAM3: máscara lista (score ${Number(data.mask_score || 0).toFixed(3)})`;
+          }
+          statusEl.textContent = "Máscara SAM3 guardada. Se usará al reentrenar.";
+        } catch (err) {
+          statusEl.textContent = err.message;
+          statusEl.classList.add("error");
+          if (sam3StatusEl) sam3StatusEl.textContent = `SAM3: ${err.message}`;
+        }
+      }
+
+      document.getElementById("btn-sam3-mask")?.addEventListener("click", () => generateSam3Mask());
+
+      document.getElementById("btn-prev")?.addEventListener("click", () => goToImage(-1));
+      document.getElementById("btn-next")?.addEventListener("click", () => goToImage(1));
+      document.getElementById("btn-reviewed")?.addEventListener("click", () => setStatus("revisado").catch((e) => { statusEl.textContent = e.message; }));
+      document.getElementById("btn-pending")?.addEventListener("click", () => setStatus("pendiente").catch((e) => { statusEl.textContent = e.message; }));
+      document.getElementById("btn-data")?.addEventListener("click", () => togglePanel("panel-data-open"));
+      document.getElementById("btn-strip")?.addEventListener("click", () => togglePanel("panel-list-open"));
+      document.getElementById("btn-help")?.addEventListener("click", () => dialog?.showModal());
+      document.getElementById("close-shortcuts")?.addEventListener("click", () => dialog?.close());
+
+      syncPanelButtons();
+
+      window.addEventListener("keydown", (event) => {
+        if (event.target.matches("input, textarea, select")) return;
+        const key = event.key.toLowerCase();
+
+        if (key === "escape") {
+          if (addMode) { setAddMode(false); return; }
+          event.preventDefault();
+          exitToMenu();
+          return;
+        }
+        if (key === "a") { event.preventDefault(); setAddMode(!addMode); return; }
+        if (key === "s") { event.preventDefault(); generateSam3Mask(); return; }
+        if (key === "j" || key === "arrowleft") { event.preventDefault(); goToImage(-1); return; }
+        if (key === "k" || key === "arrowright") { event.preventDefault(); goToImage(1); return; }
+        if (key === "r") { event.preventDefault(); setStatus("revisado").catch(() => {}); return; }
+        if (key === "u") { event.preventDefault(); setStatus("pendiente").catch(() => {}); return; }
+        if (key === "d") { event.preventDefault(); downloadBtn?.click(); return; }
+        if (key === "g") { event.preventDefault(); togglePanel("panel-data-open"); return; }
+        if (key === "l") { event.preventDefault(); togglePanel("panel-list-open"); return; }
+        if (key === "f") { event.preventDefault(); toggleFocus(); return; }
+        if (key === "?") { event.preventDefault(); dialog?.showModal(); return; }
+
+        if (/^[1-9]$/.test(key)) {
+          event.preventDefault();
+          highlightPoint(Number(key));
+        }
+      });
+    })();
+  </script>
+  {% endif %}
+  {% if tab == 'cargar' %}
+  <script>
+    (function () {
+      const form = document.getElementById("upload-form");
+      const dropZone = document.getElementById("drop-zone");
+      const fileInput = document.getElementById("file-input");
+      const folderInput = document.getElementById("folder-input");
+      const statusEl = document.getElementById("drop-status");
+      const submitBtn = document.getElementById("submit-upload");
+      const IMAGE_EXT = /\.(jpe?g|png|webp|bmp)$/i;
+
+      if (!form || !dropZone || !fileInput) return;
+
+      let selectedFiles = [];
+
+      function isImageFile(name) {
+        return IMAGE_EXT.test(String(name || "").toLowerCase());
+      }
+
+      function fileWithPath(file) {
+        const path = file.webkitRelativePath || file.name;
+        if (path === file.name) return file;
+        return new File([file], path, {
+          type: file.type,
+          lastModified: file.lastModified,
+        });
+      }
+
+      function syncToInput() {
+        const dt = new DataTransfer();
+        selectedFiles.forEach((file) => dt.items.add(fileWithPath(file)));
+        fileInput.files = dt.files;
+      }
+
+      function updateStatus() {
+        if (!selectedFiles.length) {
+          statusEl.classList.add("hidden");
+          statusEl.textContent = "";
+          dropZone.classList.remove("has-files");
+          return;
+        }
+
+        dropZone.classList.add("has-files");
+        statusEl.classList.remove("hidden");
+        const preview = selectedFiles
+          .slice(0, 4)
+          .map((file) => file.webkitRelativePath || file.name)
+          .join(", ");
+        const extra =
+          selectedFiles.length > 4
+            ? ` y ${selectedFiles.length - 4} más`
+            : "";
+        statusEl.textContent = `${selectedFiles.length} imagen(es) listas: ${preview}${extra}`;
+      }
+
+      function setFiles(files) {
+        selectedFiles = files.filter((file) =>
+          isImageFile(file.webkitRelativePath || file.name)
+        );
+        syncToInput();
+        updateStatus();
+      }
+
+      function traverseEntry(entry, path, bucket) {
+        return new Promise((resolve) => {
+          if (entry.isFile) {
+            entry.file((file) => {
+              const rel = path ? `${path}/${file.name}` : file.name;
+              if (isImageFile(rel)) {
+                bucket.push(
+                  new File([file], rel, {
+                    type: file.type,
+                    lastModified: file.lastModified,
+                  })
+                );
+              }
+              resolve();
+            });
+            return;
+          }
+
+          if (!entry.isDirectory) {
+            resolve();
+            return;
+          }
+
+          const dirPath = path ? `${path}/${entry.name}` : entry.name;
+          const reader = entry.createReader();
+
+          function readBatch() {
+            reader.readEntries(async (entries) => {
+              if (!entries.length) {
+                resolve();
+                return;
+              }
+              for (const child of entries) {
+                await traverseEntry(child, dirPath, bucket);
+              }
+              readBatch();
+            });
+          }
+
+          readBatch();
+        });
+      }
+
+      async function collectFromDataTransfer(dataTransfer) {
+        const bucket = [];
+        const items = dataTransfer.items;
+
+        if (items && items.length) {
+          const tasks = [];
+          for (const item of items) {
+            if (item.kind !== "file") continue;
+            const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+            if (entry) {
+              tasks.push(traverseEntry(entry, "", bucket));
+            } else {
+              const file = item.getAsFile();
+              if (file && isImageFile(file.name)) bucket.push(file);
+            }
+          }
+          if (tasks.length) await Promise.all(tasks);
+          if (bucket.length) return bucket;
+        }
+
+        for (const file of dataTransfer.files) {
+          if (isImageFile(file.name)) bucket.push(file);
+        }
+        return bucket;
+      }
+
+      ["dragenter", "dragover"].forEach((eventName) => {
+        dropZone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dropZone.classList.add("dragover");
+        });
+      });
+
+      ["dragleave", "drop"].forEach((eventName) => {
+        dropZone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dropZone.classList.remove("dragover");
+        });
+      });
+
+      dropZone.addEventListener("drop", async (event) => {
+        const files = await collectFromDataTransfer(event.dataTransfer);
+        setFiles(files);
+      });
+
+      dropZone.addEventListener("click", () => fileInput.click());
+      dropZone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          fileInput.click();
+        }
+      });
+
+      document.getElementById("pick-images").addEventListener("click", () => {
+        fileInput.click();
+      });
+
+      document.getElementById("pick-folder").addEventListener("click", () => {
+        folderInput.click();
+      });
+
+      document.getElementById("clear-files").addEventListener("click", () => {
+        selectedFiles = [];
+        fileInput.value = "";
+        folderInput.value = "";
+        syncToInput();
+        updateStatus();
+      });
+
+      fileInput.addEventListener("change", () => {
+        setFiles([...fileInput.files]);
+      });
+
+      folderInput.addEventListener("change", () => {
+        setFiles([...folderInput.files]);
+      });
+
+      form.addEventListener("submit", (event) => {
+        if (!selectedFiles.length) {
+          event.preventDefault();
+          alert("Arrastra o selecciona al menos una imagen compatible.");
+          return;
+        }
+
+        syncToInput();
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Procesando...";
+      });
+    })();
+  </script>
+  {% endif %}
+</body>
+</html>

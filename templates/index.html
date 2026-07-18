@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Segmentación Bentónica</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #0f172a; color: #e2e8f0; }
+    h1 { margin-top: 0; }
+    h2 { font-size: 1.1rem; margin: 0 0 12px 0; }
+    .card { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .col { flex: 1 1 420px; }
+    input, button { font-size: 14px; }
+    input[type="number"] { width: 110px; padding: 6px; border-radius: 6px; border: 1px solid #475569; background: #0b1220; color: #e2e8f0; }
+    input[type="file"] { margin-right: 10px; max-width: 100%; }
+    button { padding: 8px 12px; border-radius: 6px; border: 1px solid #475569; background: #0ea5e9; color: #001018; font-weight: 700; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border-bottom: 1px solid #334155; padding: 8px; text-align: left; font-size: 13px; }
+    .error { color: #fda4af; font-weight: 700; }
+    .muted { color: #94a3b8; font-size: 13px; }
+    img { max-width: 100%; border-radius: 8px; border: 1px solid #334155; }
+    code { background: #1e293b; padding: 2px 6px; border-radius: 5px; }
+    .result-block { margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid #334155; }
+    .result-block:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  </style>
+</head>
+<body>
+  <h1>Mini Software de Segmentación Bentónica</h1>
+  <p class="muted">
+    Sube una o varias imágenes para segmentar clases:
+    {{ classes|join(", ") if classes else "sin clases cargadas" }}.
+  </p>
+
+  <div class="card">
+    <form method="post" enctype="multipart/form-data">
+      <input type="file" name="file" accept=".jpg,.jpeg,.png,.webp,.bmp" multiple required>
+      <label>conf:</label>
+      <input type="number" step="0.01" min="0" max="1" name="conf" value="{{ conf if conf is not none else 0.25 }}">
+      <label>iou:</label>
+      <input type="number" step="0.01" min="0" max="1" name="iou" value="{{ iou if iou is not none else 0.5 }}">
+      <button type="submit">Procesar</button>
+    </form>
+    <p class="muted">Servidor: <code>http://127.0.0.1:9001</code> — puedes seleccionar varias imágenes a la vez.</p>
+    {% if error %}
+      <p class="error">{{ error }}</p>
+    {% endif %}
+  </div>
+
+  {% if results %}
+  <div class="card">
+    <h2>Resultados ({{ results|length }} imagen/es)</h2>
+    {% for item in results %}
+    <div class="result-block">
+      <p class="muted"><strong>Archivo:</strong> {{ item.filename }}</p>
+      {% if item.error %}
+        <p class="error">{{ item.error }}</p>
+      {% else %}
+      <div class="row">
+        <div class="col">
+          <h3>Segmentación</h3>
+          {% if item.image_url %}
+            <img src="{{ item.image_url }}" alt="Resultado {{ item.filename }}">
+          {% endif %}
+        </div>
+        <div class="col">
+          <h3>Cobertura por clase (%)</h3>
+          <table>
+            <thead>
+              <tr><th>Clase</th><th>Cobertura</th></tr>
+            </thead>
+            <tbody>
+              {% for row in item.coverage %}
+              <tr><td>{{ row.class_name }}</td><td>{{ row.percent }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+
+          <h3>Detecciones ({{ item.num_detections }})</h3>
+          <table>
+            <thead>
+              <tr><th>Clase</th><th>Confianza</th><th>BBox xyxy</th></tr>
+            </thead>
+            <tbody>
+              {% if item.detections %}
+                {% for d in item.detections %}
+                <tr>
+                  <td>{{ d.class_name }}</td>
+                  <td>{{ d.confidence }}</td>
+                  <td>{{ d.bbox }}</td>
+                </tr>
+                {% endfor %}
+              {% else %}
+                <tr><td colspan="3">Sin detecciones para los umbrales actuales.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</body>
+</html>
