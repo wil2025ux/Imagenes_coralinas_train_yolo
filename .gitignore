@@ -1,5 +1,6 @@
 # --- Documentación pesada / no código (pedido del usuario) ---
 *.md
+!README.md
 *.pdf
 *.PDF
 *.doc
